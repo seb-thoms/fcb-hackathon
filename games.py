@@ -13,7 +13,8 @@ when you read the tracking data, which runs on its own counter.
 Data location
 -------------
 The match assets are gated: they are not in this repository. Download them (see DATA.md) and put
-them in ./data, or point MTAH_DATA_DIR somewhere else:
+them in ./data, or point MTAH_DATA_DIR somewhere else -- in a .env file at the repository root
+(copy .env.example; it is gitignored), or in your shell, which takes precedence over .env:
 
     export MTAH_DATA_DIR=/path/to/mtah2027        # macOS / Linux
     $env:MTAH_DATA_DIR = "D:\\mtah2027"           # Windows PowerShell
@@ -26,10 +27,42 @@ import os
 
 GAME = "BAR-ATH"
 
+_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def _load_dotenv(path=os.path.join(_REPO_DIR, ".env")):
+    """Copy KEY=VALUE lines from the repository's .env into os.environ, if the file exists.
+
+    Standard library only, like the rest of this module. Variables already set in the environment
+    win, so a shell export still overrides the file. Values are taken literally -- no escapes, no
+    $VAR expansion -- so Windows paths survive as written; one pair of surrounding quotes is
+    stripped.
+    """
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            lines = f.read().splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key.startswith("export "):
+            key = key[len("export "):].strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+_load_dotenv()
+
 # Root of the downloaded data bundle. Nothing in this module opens it; the paths below are built
 # so that tooling which does need the video has one place to look.
-DATA_DIR = os.environ.get("MTAH_DATA_DIR") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "data")
+DATA_DIR = os.environ.get("MTAH_DATA_DIR") or os.path.join(_REPO_DIR, "data")
 
 GAMES = {
     "BAR-ATH": {

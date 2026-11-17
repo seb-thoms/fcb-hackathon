@@ -101,7 +101,8 @@ The match assets are released to enrolled participants who have accepted the ter
 1. Enrol: **[More than A Hack 2027](https://landing.mobileworldcapital.com/more-than-a-hack-2027)**
 2. Read and sign the terms and conditions in the registration form
 3. You receive a download link.
-4. Unpack it into `./data`, or point `MTAH_DATA_DIR` at wherever you put it.
+4. Unpack it into `./data`, or point `MTAH_DATA_DIR` at wherever you put it — in your shell, or
+   in a `.env` file at the repository root (copy `.env.example` to `.env`; it is gitignored).
 
 Full description of every asset and how the frames line up: **[DATA.md](DATA.md)**.
 
