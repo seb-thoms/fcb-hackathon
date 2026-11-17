@@ -1,5 +1,19 @@
 # More than a Hack 2027 — Phase 1: Ball Possession
 
+> **Team Fellowship — our submission.** Event-gated Viterbi over H / A / D on the automatic
+> tracking; no learning and no labels from the provided game. Method, assets, validation and
+> limitations: [submission/Fellowship.md](submission/Fellowship.md). Code: [solution/](solution/).
+>
+> ```bash
+> pip install -r requirements-solution.txt          # numpy, pandas (pinned)
+> # unpack the match data into ./data (see DATA.md)
+> python solution/pipeline.py --out submission/Fellowship.csv
+> python evaluation/validate_submission.py submission/Fellowship.csv
+> ```
+>
+> Deterministic: the file is byte-identical on every run (MD5 `8aac452748347bc72c7cd66db97ba5ba`).
+> Everything below this box is the organisers' original README.
+
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
 and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
 
