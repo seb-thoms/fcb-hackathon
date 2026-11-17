@@ -67,8 +67,8 @@ Label stats (graded frames; control rule / touch rule possessions):
 Check against Metrica's own corrected tracking, which blanks the ball while it is dead (never used
 to build the labels): the ball is missing on 92/97/99% of our D frames and 0.8/1.3/0.4% of live
 frames; it reappears exactly at our restart frame (median offset 0) and vanishes a median 2-4
-frames after our stoppage start (Metrica blanks at BALL OUT End Frame + 1, a median 2-6 frames
-after the line crossing; at FORCED End + 1; at the last foul event + 1).
+frames after our stoppage start (Metrica blanks at BALL OUT End Frame + 1, End Frame being a
+median 2-6 frames after the line crossing; at FORCED End + 1; mostly at the last foul event + 1).
 
 DEGRADATION (degrade=True; deterministic in (seed, game); degrade={...} overrides DEGRADE)
   ball: short (< 3 s) gaps interpolated as the provider does; dead-ball visibility synthesized
@@ -102,8 +102,10 @@ CAVEATS
   * The control rule follows CHALLENGE.md's wording (no change on a touch without control), and its
     mean possession (15 s) is close to BAR-ATH's public 14.2 s. A tracking owner that flips on every
     opponent touch would look like rule="touch" (1.6x more possessions). The published BAR-ATH
-    baseline sweep (w125 worse than w50) looks like the touch rule (w50 0.33 > w125 0.28 degraded)
-    and not like the control rule (w125 0.37 > w50 0.33); score both if a decision hinges on it.
+    baseline sweep is mixed evidence (degraded, games 1-3 x seeds 0-2, window 0/25/50/125):
+    control 0.048/0.236/0.331/0.375, touch 0.083/0.270/0.328/0.289, BAR-ATH 0.049/0.200/0.243/0.224.
+    The raw w0 score matches control; the w125 < w50 order matches touch. If a decision depends on
+    it, score both rules.
   * The degraded baseline is still easier than BAR-ATH (spellF1 ~0.33 vs 0.24, macroF1 ~0.77 vs
     0.67). Raising dead-ball ball visibility to miss_dead ~0.58 reproduces BAR-ATH's baseline
     macroF1 sweep almost exactly but breaks the 59% ball-present target and barely moves spellF1,

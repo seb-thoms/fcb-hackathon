@@ -716,3 +716,86 @@ If the session stays alive, review fixes and harness results will be pushed as f
 - v2: check out `eb3f9de` in a separate worktree, `pip install scikit-learn==1.7.2`, then run `python solution/pipeline.py`.
 
 **Still open:** the team name, and the final v2/v3 choice.
+
+---
+
+## 12. Update — Nov 17: external validation done, final version chosen (v4)
+
+### 12.1 TL;DR
+
+- **Final version: v4** = the v3 pipeline with parameters chosen on the external matches. It is the
+  default `python solution/pipeline.py`, which writes `evaluation/results/solution_final.csv`.
+- The file passes the validator and is deterministic (byte-identical on rerun).
+- **The two subagents from §11.5:**
+  - The **harness finished.** `solution/validation/metrica_sample.py` is complete and documented in its docstring.
+  - The **code-review agent died** when the connection dropped. Its partial leads were checked by hand:
+    the "stale exit context" was fixed, and short dead runs created by brief line pokes were checked
+    and handled by the new 3 s minimum. Its third note, that restart claims sometimes override the
+    first-pass team, is the intended behaviour.
+- **What's left:** pick the team name, generate and validate the file, submit the form, make the repo
+  public. See §12.5.
+
+### 12.2 External validation (labels from other games, allowed by the rules)
+
+The harness uses Metrica's three public sample matches:
+- **labels:** derived from their event data;
+- **tracking:** degraded to look like our ATD (ball present ~60%, mostly missing in stoppages, ~10% missing in live play, dropouts, duplicates, team-flip ghosts, noise).
+
+Scores are mean spellF1 over 3 games × 3 seeds, under two label rules:
+- **"control":** possession changes on controlled possession. This is closest to our ground truth, whose mean possession is 14.2 s against 14.9 s for this rule.
+- **"touch":** possession changes on any opponent touch.
+
+| version | control | touch | macroF1 |
+|---|---|---|---|
+| starter baseline | 0.331 | 0.328 | 0.774 |
+| v1 logic (rules + Viterbi) | 0.592 | 0.460 | 0.844 |
+| v3, initial parameters | 0.661 | 0.553 | 0.873 |
+| **v4 (final)** | **0.710** | **0.576** | **0.897** |
+| v4 with the ball smoothed like our ATD | 0.693 | 0.541 | 0.886 |
+
+**How the parameters were chosen** (`solution/tune_external.py`):
+- **Method:** one-at-a-time sweeps, then combined A/B tests. A change was kept only if it helped under both label rules *and* with the ball smoothed like our ATD.
+- **What changed:**
+  - control radius 1.5 → 1.0 m;
+  - run gap 5 → 8 s;
+  - restart onset threshold 1.8 → 1.2 m/s;
+  - stillness weight 0.4 → 0.2;
+  - live-evidence weights up (fast ball 0.6, player on ball 0.45);
+  - default costs to enter / leave dead ball up (14 / 30);
+  - minimum dead run without a crossing 2 → 3 s.
+- **Kept:** the touch window stays ±5 frames. It wins once the harness ball is smoothed like ours (±3 only wins on the unsmoothed harness ball).
+- **Arbitrated by the BAR-ATH blackout test:**
+  - The long-gap dead-ball weight stays 0.1. The value 0.3 scored the same externally but turned 22–26% of hidden live blackouts dead.
+  - The live weights were halved back from 0.8 / 0.6 to 0.6 / 0.45 for the same reason, at ≤ 0.003 external cost.
+
+### 12.3 BAR-ATH checks for v4 (label-free unless noted)
+
+| check | v4 |
+|---|---|
+| possessions / dead-ball runs (full match) | 245 / 93 |
+| dead-ball share | 0.43 / 0.45 (1st / 2nd half) |
+| set pieces with a predicted D near the tag | 52/53 |
+| restart within 30 s of a set-piece tag start | 56/59 (median 5.4 s after the tag) |
+| broadcast off, dead vs live frames | 0.82 / 0.13 |
+| decoded boundaries landing exactly on a detected event | switches 135/153, D entries 69/92, D exits 66/91 |
+| blackout test, label kept (false dead) | 5 s: 0.91 (0.04) · 15 s: 0.89 (0.06) · 30 s: 0.74 (0.02) |
+| *public window, bug check only:* spellF1 / macroF1 | 0.388 / 0.820 (v2 0.485 / 0.755; v3 0.412 / 0.826) |
+
+**On the public window:** it ranks v2 highest on spellF1, but with 17 possessions its bootstrap range is about ±0.16, and the rules forbid tuning on it. The external harness, with ~700 labelled possessions, ranks v4 clearly first. We chose **v4**.
+
+### 12.4 Files added or changed today
+- `solution/pipeline.py`: final parameters, decoded exit context, optional team-flip cleaning (off).
+- `solution/tracks.py`: team-flip cleaning (off by default; neutral externally).
+- `solution/tune_external.py`: A/B and sweep tool (both label rules, seeds, ball smoothing).
+- `solution/external_report.py`: boundary latency and oracle ablations on the external games.
+- `solution/validation/metrica_sample.py`: finished harness.
+- `TECHNICAL_DOCUMENT.md`: complete, including the Metrica sample data credit.
+
+### 12.5 To submit (remaining steps)
+1. Agree the **team name**.
+2. `pip install -r requirements-solution.txt && python solution/pipeline.py`, then copy
+   `evaluation/results/solution_final.csv` to `<team_name>.csv`.
+3. Run `python evaluation/validate_submission.py <team_name>.csv` on the exact file. The expected MD5 is
+   `8defc0ce203e177f87a46be344d58872`.
+4. Export `TECHNICAL_DOCUMENT.md` as `<team_name>.pdf`, or upload the `.md`.
+5. **Make the repo public**, check that no data is committed, and submit the form before the deadline.

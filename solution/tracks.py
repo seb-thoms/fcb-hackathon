@@ -57,8 +57,39 @@ def drop_ghosts_and_duplicates(players, real, team, chunk=8000):
     return out
 
 
-def clean(players, team):
+CROSS_R = 0.6          # m: an opposite-team object this close to a player is usually the same person
+
+
+def drop_team_flips(players, real, team, chunk=8000):
+    """The tracker sometimes reports a player a second time with the other team's label. Where two
+    opposite-team observations sit within CROSS_R and one team shows more than 11 objects, drop
+    that team's object of the pair."""
+    out = players.copy()
+    n, S, _ = players.shape
+    home = np.flatnonzero(team == 0)
+    away = np.flatnonzero(team == 1)
+    for a in range(0, n, chunk):
+        b = min(n, a + chunk)
+        p = out[a:b]
+        ok = ~np.isnan(p[:, :, 0])
+        n_h = ok[:, home].sum(axis=1)
+        n_a = ok[:, away].sum(axis=1)
+        d = np.linalg.norm(p[:, home, None, :] - p[:, None, away, :], axis=3)   # (m, nh, na)
+        close = np.where(np.isnan(d), False, d < CROSS_R)
+        drop_h = close.any(axis=2) & (n_h > 11)[:, None]
+        drop_a = close.any(axis=1) & (n_a > 11)[:, None] & ~(n_h > 11)[:, None]
+        mi, ci = np.nonzero(drop_h)
+        p[mi, home[ci]] = np.nan
+        mi, ci = np.nonzero(drop_a)
+        p[mi, away[ci]] = np.nan
+        out[a:b] = p
+    return out
+
+
+def clean(players, team, team_flips=True):
     filled, real = carry_forward(players)
     cleaned = drop_ghosts_and_duplicates(filled, real, team)
+    if team_flips:
+        cleaned = drop_team_flips(cleaned, real, team)
     real_after = real & ~np.isnan(cleaned[:, :, 0])
     return cleaned, real_after
