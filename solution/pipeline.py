@@ -389,7 +389,9 @@ def run_barath(P=None, use_tags=True, use_broadcast=True, verbose=False):
 
 def write_csv(path, labels):
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w") as fh:
+    # newline="\n": the same bytes on every OS (text mode would write \r\n on Windows), so the file
+    # is byte-identical to the submitted one wherever it is regenerated.
+    with open(path, "w", newline="\n") as fh:
         fh.write("frame,label\n")
         fh.writelines("{},{}\n".format(i, l) for i, l in enumerate(labels))
 

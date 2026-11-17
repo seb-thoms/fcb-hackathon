@@ -53,6 +53,10 @@ data/*
 # insurance against it being recreated in here by habit.
 organizers/
 
+# -- local settings ----------------------------------------------------------------------------
+# .env holds machine-specific paths (MTAH_DATA_DIR). .env.example is the committed template.
+.env
+
 # -- editors and build artifacts ---------------------------------------------------------------
 .idea/
 .vscode/
