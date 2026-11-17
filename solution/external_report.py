@@ -77,7 +77,10 @@ def latency_table(gt, pr, runs):
 
 
 def report(P=None, ids=(1, 2, 3), degrade=True, ball_smooth=0):
-    for d in te.games(ids, degrade, 0, ball_smooth):
+    import metrica_sample as ms
+    for g in ids:
+        d = ms.load_game(g, degrade=degrade, seed=0)
+        d = dict(d, ball=te.smooth_ball(np.asarray(d["ball"], dtype=np.float64), ball_smooth))
         labels, aux = pl.label_match(d, d["halves"], home_pos_first=d["home_attacks_positive_x_first_half"],
                                      P=P or {})
         gt, pr = codes(d["labels"]), codes(labels)

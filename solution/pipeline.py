@@ -35,34 +35,37 @@ LABELS = np.array(["H", "A", "D"])
 TYPE_ZONES = {"corner kick": ("corner",), "goal kick": ("goal_area",), "throw-in": ("touchline", "corner"),
               "kick off (start)": ("centre",), "kick off (after goal)": ("centre",)}
 
+# Values chosen on OTHER matches (Metrica public sample games, tracking degraded to look like the
+# BAR-ATH automatic tracking; solution/tune_external.py), never on BAR-ATH labels.
 PARAMS = dict(
     # touches and control
     touch_k=5, touch_dv=3.0, touch_r=2.5,   # the ATD ball is smoothed: changes span ~0.4 s
-    ctrl_r=1.5, ctrl_relv=3.0, ctrl_margin=0.5, ctrl_episode=8, ctrl_min=20, run_gap=5 * FPS,
+    ctrl_r=1.0, ctrl_relv=3.0, ctrl_margin=0.5, ctrl_episode=8, ctrl_min=20, run_gap=200,
     # dead-ball entry
     out_margin=0.3, lost_gap_min=2 * FPS, lost_dist=4.0, lost_speed=3.0,
     slow_before=1.6, slow_after=1.3, slow_drop=0.6,
     # restarts
     still_speed=1.0, still_frames=8, kick_within=8, kick_speed=4.0, taker_r=3.0,
     reappear_gap=3 * FPS,
-    onset_pre=15, onset_post=12, onset_pre_speed=1.8, onset_post_speed=5.0,
+    onset_pre=15, onset_post=12, onset_pre_speed=1.2, onset_post_speed=5.0,
     lost_any_gap=3 * FPS,
     # emissions
     w_runteam=0.25, w_ctrl=0.5,
-    w_oob=1.0, w_fast=0.4, w_dribble=0.3, w_still=0.4, still_mid=1.5, still_half=0.5,
+    w_oob=1.0, w_fast=0.6, w_dribble=0.45, w_still=0.2, still_mid=1.5, still_half=0.5,
     w_boff=0.3, w_bon=0.25, w_tag=0.3, w_longgap=0.1,
     # transitions (costs in nats)
     pen_switch=12.0, pen_switch_event=1.5,
-    pen_in=10.0, pen_in_cross=0.5, pen_in_lost=2.0, pen_in_slow=3.0, pen_in_gap=3.0,
-    pen_out=20.0, pen_out_kick=1.0, pen_out_kick_other=6.0, pen_out_reappear=3.0,
+    pen_in=14.0, pen_in_cross=0.5, pen_in_lost=2.0, pen_in_slow=3.0, pen_in_gap=3.0,
+    pen_out=30.0, pen_out_kick=2.0, pen_out_kick_other=6.0, pen_out_reappear=3.0,
     exit_ctx=45 * FPS, throw_dx=20.0, pen_zone_mismatch=3.0,
     # clean-up
-    min_dead=2 * FPS, min_blip=12,
+    min_dead=3 * FPS, min_blip=12,
     # smart-tagging restart window around a set-piece tag start
     tag_lo=-2 * FPS, tag_hi=15 * FPS,
     # blackout change point
     gap_cp_min=2 * FPS, gap_cp_look=3 * FPS, gap_cp_gain=5.0,
-    two_pass=True,
+    two_pass=True, exit_ctx_decoded=True, exit_slack=2 * FPS,
+    team_flips=False,
 )
 
 
@@ -131,7 +134,8 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
     team, gk = np.asarray(data["team"]), np.asarray(data["gk"])
     ball = np.asarray(data["ball"], dtype=np.float64)
     n = len(ball)
-    players, real = tracks.clean(np.asarray(data["players"], dtype=np.float64), team)
+    players, real = tracks.clean(np.asarray(data["players"], dtype=np.float64), team,
+                                 team_flips=P["team_flips"])
     players_real = np.where(real[:, :, None], players, np.nan)
     present = ~np.isnan(ball[:, 0])
 
@@ -207,46 +211,55 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
     inD[lost_f] = np.minimum(inD[lost_f], P["pen_in_lost"])
     inD[slow_f] = np.minimum(inD[slow_f], P["pen_in_slow"])
     inD[gap_f] = np.minimum(inD[gap_f], P["pen_in_gap"])
-    outH = np.full(n, P["pen_out"]); outA = np.full(n, P["pen_out"])
     # restart must fit how the ball went dead: touchline exit -> touchline near the exit point;
     # goal-line exit -> corner or goal area (or centre after a goal); no exit seen -> anywhere
     exits = sorted([(int(f), bool(g), ball[f].copy()) for f, g in zip(cross_f, cross_goal)] +
                    [(int(f), None, ball[max(0, f - 1)].copy()) for f in lost_f], key=lambda e: e[0])
     exit_frames = np.array([e[0] for e in exits], dtype=np.int64)
-    for r in restarts:
-        f = r["frame"]
-        if r["kind"] == "kick":
-            own, oth = P["pen_out_kick"], P["pen_out_kick_other"]
-        else:
-            own, oth = P["pen_out_reappear"], P["pen_out_reappear"] + 3.0
+
+    def window_context(f):
         k = np.searchsorted(exit_frames, f) - 1
-        if k >= 0 and f - exit_frames[k] <= P["exit_ctx"]:
-            _, goal_line, xy = exits[k]
-            z = r["zone"]
-            if goal_line is None:
-                fits = True
-            elif goal_line:
-                fits = z in ("corner", "goal_area", "centre")
+        return exits[k] if k >= 0 and f - exit_frames[k] <= P["exit_ctx"] else None
+
+    def restart_costs(context_of):
+        outH = np.full(n, P["pen_out"]); outA = np.full(n, P["pen_out"])
+        for r in restarts:
+            f = r["frame"]
+            if r["kind"] == "kick":
+                own, oth = P["pen_out_kick"], P["pen_out_kick_other"]
             else:
-                fits = z == "touchline" and abs(ball[f, 0] - xy[0]) < P["throw_dx"]
-            if not fits:
-                own += P["pen_zone_mismatch"]; oth += P["pen_zone_mismatch"]
-        # a tagged set piece names the restart type: the candidate's zone should match it
-        for t in sp_tags:
-            if t["start"] + P["tag_lo"] <= f <= t["start"] + P["tag_hi"]:
-                want = TYPE_ZONES.get(t["type"])
-                if want is not None and r["zone"] not in want:
+                own, oth = P["pen_out_reappear"], P["pen_out_reappear"] + 3.0
+            ctx = context_of(f)
+            if ctx is not None:
+                _, goal_line, xy = ctx
+                z = r["zone"]
+                if goal_line is None:
+                    fits = True
+                elif goal_line:
+                    fits = z in ("corner", "goal_area", "centre")
+                else:
+                    fits = z == "touchline" and abs(ball[f, 0] - xy[0]) < P["throw_dx"]
+                if not fits:
                     own += P["pen_zone_mismatch"]; oth += P["pen_zone_mismatch"]
-                break
-        if r["team"] == 0:
-            outH[f] = min(outH[f], own); outA[f] = min(outA[f], oth)
-        else:
-            outA[f] = min(outA[f], own); outH[f] = min(outH[f], oth)
+            # a tagged set piece names the restart type: the candidate's zone should match it
+            for t in sp_tags:
+                if t["start"] + P["tag_lo"] <= f <= t["start"] + P["tag_hi"]:
+                    want = TYPE_ZONES.get(t["type"])
+                    if want is not None and r["zone"] not in want:
+                        own += P["pen_zone_mismatch"]; oth += P["pen_zone_mismatch"]
+                    break
+            if r["team"] == 0:
+                outH[f] = min(outH[f], own); outA[f] = min(outA[f], oth)
+            else:
+                outA[f] = min(outA[f], own); outH[f] = min(outH[f], oth)
+        return outH, outA
+
+    outH, outA = restart_costs(window_context)
 
     # ---- decode each half
     kickoffs = {t["half"]: t["start"] for t in sp_tags if t["type"] == "kick off (start)"}
 
-    def decode(sH, sA, swH, swA):
+    def decode(sH, sA, swH, swA, outH, outA):
         path = np.full(n, -1, dtype=np.int8)
         for half, first, last in halves:
             sl = slice(first, last + 1)
@@ -258,7 +271,7 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
             path[sl] = viterbi_tv(h_s, a_s, d_s, swH[sl], swA[sl], inD[sl], outH[sl], outA[sl])
         return path
 
-    path = decode(sH, sA, swH, swA)
+    path = decode(sH, sA, swH, swA, outH, outA)
     if P["two_pass"]:
         # every restart has a clear possessor: the decoded restart team starts a new possession,
         # whatever the last controlled run before the stoppage was
@@ -270,7 +283,22 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
         sw_f, sw_t, run_team, ev_f, ev_t = ev.possession_events(touch, ctrl, present, P, forced=forced)
         sH, sA = team_scores(run_team)
         swH, swA = switch_costs(sw_f, sw_t)
-        path = decode(sH, sA, swH, swA)
+        if P["exit_ctx_decoded"]:
+            # judge each restart only against the exit that started its own decoded stoppage
+            dead_start = np.full(n, -1, dtype=np.int64)
+            for s0, e0 in ev.runs_of(path == D):
+                dead_start[s0:e0 + 1] = s0
+            slack = P["exit_slack"]
+
+            def decoded_context(f):
+                s0 = dead_start[f - 1] if f > 0 else -1
+                if s0 < 0:
+                    return window_context(f)
+                k = np.searchsorted(exit_frames, s0 + slack, side="right") - 1
+                return exits[k] if k >= 0 and exit_frames[k] >= s0 - slack else None
+
+            outH, outA = restart_costs(decoded_context)
+        path = decode(sH, sA, swH, swA, outH, outA)
 
     # ---- clean-up
     cross_set = np.zeros(n, dtype=bool); cross_set[cross_f] = True
