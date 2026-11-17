@@ -128,32 +128,39 @@ def control_frames(ball, bvel, players, pvel, team, P):
     return out, dn, tj
 
 
-def possession_events(touch, ctrl, present, P):
+def possession_events(touch, ctrl, present, P, forced=None):
     """Event-level possession: merge touches and control-episode onsets into a time-ordered list
     of team claims, group consecutive same-team claims into runs, and keep runs that show control
-    (>= 2 claims, or >= ctrl_min frames of control in the first 2 s). Returns
+    (>= 2 claims, or >= ctrl_min frames of control in the first 2 s). `forced` = [(frame, team)]
+    claims that are always controlled and always start a new run (restarts: after every restart
+    there is a clear possessor). Returns
       switch_frame, switch_team: first (uncontested if possible) claim of each controlled run whose
-                                 team differs from the previous controlled run
+                                 team differs from the current possessor
       run_team: per-frame team of the latest controlled run (-1 before the first).
     """
     n = len(ctrl)
     ev_f, ev_t, ev_c = list(touch["frame"]), list(touch["team"]), list(touch["contested"])
+    ev_x = [False] * len(ev_f)
     # control-episode onsets act as receptions (slow balls do not make velocity peaks)
     for team_id in (0, 1):
         for s, e in runs_of(ctrl == team_id):
             if e - s >= P["ctrl_episode"]:
-                ev_f.append(s); ev_t.append(team_id); ev_c.append(False)
-    order = np.argsort(np.array(ev_f, dtype=np.int64), kind="stable")
+                ev_f.append(s); ev_t.append(team_id); ev_c.append(False); ev_x.append(False)
+    for f, t in (forced or []):
+        ev_f.append(int(f)); ev_t.append(int(t)); ev_c.append(False); ev_x.append(True)
+    order = np.lexsort((~np.array(ev_x, dtype=bool), np.array(ev_f, dtype=np.int64)))
     ev_f = np.array(ev_f, dtype=np.int64)[order]
     ev_t = np.array(ev_t, dtype=np.int8)[order]
     ev_c = np.array(ev_c, dtype=bool)[order]
+    ev_x = np.array(ev_x, dtype=bool)[order]
 
     cum_ctrl = {tid: np.concatenate(([0], np.cumsum(ctrl == tid))) for tid in (0, 1)}
     runs = []
     i = 0
     while i < len(ev_f):
         j = i
-        while j + 1 < len(ev_f) and ev_t[j + 1] == ev_t[i] and ev_f[j + 1] - ev_f[j] <= P["run_gap"]:
+        while (j + 1 < len(ev_f) and not ev_x[j + 1] and ev_t[j + 1] == ev_t[i]
+               and ev_f[j + 1] - ev_f[j] <= P["run_gap"]):
             j += 1
         runs.append((i, j))
         i = j + 1
@@ -166,8 +173,12 @@ def possession_events(touch, ctrl, present, P):
         f0 = int(ev_f[i])
         f1 = min(n, f0 + 2 * FPS)
         nctrl = cum_ctrl[tid][f1] - cum_ctrl[tid][f0]
-        controlled = (j - i + 1 >= 2) or (nctrl >= P["ctrl_min"])
+        controlled = bool(ev_x[i]) or (j - i + 1 >= 2) or (nctrl >= P["ctrl_min"])
         if not controlled:
+            continue
+        if ev_x[i]:
+            marks.append((f0, tid))
+            cur = tid
             continue
         if tid != cur:
             # first uncontested claim of the run, else the first claim
@@ -179,7 +190,9 @@ def possession_events(touch, ctrl, present, P):
     for idx, (f, tid) in enumerate(marks):
         end = marks[idx + 1][0] if idx + 1 < len(marks) else n
         run_team[f:end] = tid
-    return np.array(switch_f, dtype=np.int64), np.array(switch_t, dtype=np.int8), run_team, ev_f, ev_t
+    keep = ~ev_x
+    return (np.array(switch_f, dtype=np.int64), np.array(switch_t, dtype=np.int8), run_team,
+            ev_f[keep], ev_t[keep])
 
 
 # ----------------------------------------------------------------------------- dead-ball entry

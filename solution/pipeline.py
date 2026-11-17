@@ -31,6 +31,9 @@ import tracks  # noqa: E402
 FPS = 25
 H, A, D = 0, 1, 2
 LABELS = np.array(["H", "A", "D"])
+# restart zones compatible with each Smart Tagging set-piece type (free kicks: anywhere)
+TYPE_ZONES = {"corner kick": ("corner",), "goal kick": ("goal_area",), "throw-in": ("touchline", "corner"),
+              "kick off (start)": ("centre",), "kick off (after goal)": ("centre",)}
 
 PARAMS = dict(
     # touches and control
@@ -59,6 +62,7 @@ PARAMS = dict(
     tag_lo=-2 * FPS, tag_hi=15 * FPS,
     # blackout change point
     gap_cp_min=2 * FPS, gap_cp_look=3 * FPS, gap_cp_gain=5.0,
+    two_pass=True,
 )
 
 
@@ -152,13 +156,24 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
                 r["team"] = t["team"]
 
     # ---- per-frame scores
-    rel = np.zeros(n)
-    rel += np.where(present & (run_team == 0), P["w_runteam"], 0.0)
-    rel -= np.where(present & (run_team == 1), P["w_runteam"], 0.0)
-    rel += np.where(ctrl == 0, P["w_ctrl"], 0.0)
-    rel -= np.where(ctrl == 1, P["w_ctrl"], 0.0)
-    sH = np.minimum(rel, 0.0)
-    sA = -np.maximum(rel, 0.0)
+    def team_scores(run_team):
+        rel = np.zeros(n)
+        rel += np.where(present & (run_team == 0), P["w_runteam"], 0.0)
+        rel -= np.where(present & (run_team == 1), P["w_runteam"], 0.0)
+        rel += np.where(ctrl == 0, P["w_ctrl"], 0.0)
+        rel -= np.where(ctrl == 1, P["w_ctrl"], 0.0)
+        return np.minimum(rel, 0.0), -np.maximum(rel, 0.0)
+
+    def switch_costs(sw_f, sw_t):
+        swH = np.full(n, P["pen_switch"]); swA = np.full(n, P["pen_switch"])
+        for f, t in zip(sw_f, sw_t):
+            if t == 0:
+                swH[f] = min(swH[f], P["pen_switch_event"])
+            else:
+                swA[f] = min(swA[f], P["pen_switch_event"])
+        return swH, swA
+
+    sH, sA = team_scores(run_team)
 
     x, y = ball[:, 0], ball[:, 1]
     oob = present & ((x < -0.5) | (x > L + 0.5) | (y < -0.5) | (y > W + 0.5))
@@ -186,12 +201,7 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
             sD[s + 2 * FPS:e] += P["w_longgap"]
 
     # ---- per-frame transition costs
-    swH = np.full(n, P["pen_switch"]); swA = np.full(n, P["pen_switch"])
-    for f, t in zip(sw_f, sw_t):
-        if t == 0:
-            swH[f] = min(swH[f], P["pen_switch_event"])
-        else:
-            swA[f] = min(swA[f], P["pen_switch_event"])
+    swH, swA = switch_costs(sw_f, sw_t)
     inD = np.full(n, P["pen_in"])
     inD[cross_f] = np.minimum(inD[cross_f], P["pen_in_cross"])
     inD[lost_f] = np.minimum(inD[lost_f], P["pen_in_lost"])
@@ -201,7 +211,7 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
     # restart must fit how the ball went dead: touchline exit -> touchline near the exit point;
     # goal-line exit -> corner or goal area (or centre after a goal); no exit seen -> anywhere
     exits = sorted([(int(f), bool(g), ball[f].copy()) for f, g in zip(cross_f, cross_goal)] +
-                   [(int(f), None, ball[max(0, f - 1)].copy()) for f in lost_f])
+                   [(int(f), None, ball[max(0, f - 1)].copy()) for f in lost_f], key=lambda e: e[0])
     exit_frames = np.array([e[0] for e in exits], dtype=np.int64)
     for r in restarts:
         f = r["frame"]
@@ -221,22 +231,46 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
                 fits = z == "touchline" and abs(ball[f, 0] - xy[0]) < P["throw_dx"]
             if not fits:
                 own += P["pen_zone_mismatch"]; oth += P["pen_zone_mismatch"]
+        # a tagged set piece names the restart type: the candidate's zone should match it
+        for t in sp_tags:
+            if t["start"] + P["tag_lo"] <= f <= t["start"] + P["tag_hi"]:
+                want = TYPE_ZONES.get(t["type"])
+                if want is not None and r["zone"] not in want:
+                    own += P["pen_zone_mismatch"]; oth += P["pen_zone_mismatch"]
+                break
         if r["team"] == 0:
             outH[f] = min(outH[f], own); outA[f] = min(outA[f], oth)
         else:
             outA[f] = min(outA[f], own); outH[f] = min(outH[f], oth)
 
     # ---- decode each half
-    path = np.full(n, -1, dtype=np.int8)
     kickoffs = {t["half"]: t["start"] for t in sp_tags if t["type"] == "kick off (start)"}
-    for half, first, last in halves:
-        sl = slice(first, last + 1)
-        h_s, a_s, d_s = sH[sl].copy(), sA[sl].copy(), sD[sl].copy()
-        ko = kickoffs.get("1st Half" if half == 1 else "2nd Half")
-        if ko is not None and ko > first:
-            k = min(ko - first, last - first)
-            h_s[:k] = -1e3; a_s[:k] = -1e3
-        path[sl] = viterbi_tv(h_s, a_s, d_s, swH[sl], swA[sl], inD[sl], outH[sl], outA[sl])
+
+    def decode(sH, sA, swH, swA):
+        path = np.full(n, -1, dtype=np.int8)
+        for half, first, last in halves:
+            sl = slice(first, last + 1)
+            h_s, a_s, d_s = sH[sl].copy(), sA[sl].copy(), sD[sl].copy()
+            ko = kickoffs.get("1st Half" if half == 1 else "2nd Half")
+            if ko is not None and ko > first:
+                k = min(ko - first, last - first)
+                h_s[:k] = -1e3; a_s[:k] = -1e3
+            path[sl] = viterbi_tv(h_s, a_s, d_s, swH[sl], swA[sl], inD[sl], outH[sl], outA[sl])
+        return path
+
+    path = decode(sH, sA, swH, swA)
+    if P["two_pass"]:
+        # every restart has a clear possessor: the decoded restart team starts a new possession,
+        # whatever the last controlled run before the stoppage was
+        taker = {}
+        for r in restarts:
+            taker.setdefault(r["frame"], r["team"])
+        forced = [(t, taker[t]) for t in range(1, n)
+                  if path[t - 1] == D and path[t] in (H, A) and t in taker]
+        sw_f, sw_t, run_team, ev_f, ev_t = ev.possession_events(touch, ctrl, present, P, forced=forced)
+        sH, sA = team_scores(run_team)
+        swH, swA = switch_costs(sw_f, sw_t)
+        path = decode(sH, sA, swH, swA)
 
     # ---- clean-up
     cross_set = np.zeros(n, dtype=bool); cross_set[cross_f] = True
