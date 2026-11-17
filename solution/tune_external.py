@@ -60,18 +60,20 @@ def games(seeds, smooth):
 
 
 def score(P, seeds=(0, 1, 2), smooth=0):
-    c, t, m = [], [], []
+    c, t, m, ratio = [], [], [], []
     for dc, dt in games(seeds, smooth):
         lab = pl.label_match(dc, dc["halves"], dc["home_attacks_positive_x_first_half"], P=P)[0]
         sc = ms.score(lab, dc)
         c.append(sc["spell_f1"]); m.append(sc["macro_f1"])
+        ratio.append(sc["n_pred_spells"] / max(1, sc["n_gt_spells"]))
         t.append(ms.score(lab, dt)["spell_f1"])
     return dict(control=float(np.mean(c)), touch=float(np.mean(t)), macro=float(np.mean(m)),
-                worst=float(np.min(c)))
+                worst=float(np.min(c)), ratio=float(np.mean(ratio)))
 
 
 def fmt(r):
-    return "control {control:.4f}  touch {touch:.4f}  macro {macro:.4f}  worst {worst:.3f}".format(**r)
+    return ("control {control:.4f}  touch {touch:.4f}  macro {macro:.4f}  worst {worst:.3f}  "
+            "pred/true spells {ratio:.2f}").format(**r)
 
 
 if __name__ == "__main__":

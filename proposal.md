@@ -796,6 +796,70 @@ Scores are mean spellF1 over 3 games × 3 seeds, under two label rules:
 2. `pip install -r requirements-solution.txt && python solution/pipeline.py`, then copy
    `evaluation/results/solution_final.csv` to `<team_name>.csv`.
 3. Run `python evaluation/validate_submission.py <team_name>.csv` on the exact file. The expected MD5 is
-   `8defc0ce203e177f87a46be344d58872`.
+   `8defc0ce203e177f87a46be344d58872`. **This is superseded by v5 (§13).**
 4. Export `TECHNICAL_DOCUMENT.md` as `<team_name>.pdf`, or upload the `.md`.
 5. **Make the repo public**, check that no data is committed, and submit the form before the deadline.
+
+---
+
+## 13. Update — Nov 17, later: v5 fixes team-switch timing (new final)
+
+### 13.1 TL;DR
+
+- **New final: v5** = v4 plus three changes:
+  - each possession switch is **backdated to the new team's first touch**;
+  - double-counted claims are **merged**;
+  - the **stillness weight** drops from 0.2 to 0.1.
+- It is still `python solution/pipeline.py`, which writes `evaluation/results/solution_final.csv`.
+- Expected MD5: **`8aac452748347bc72c7cd66db97ba5ba`**. The file is valid and deterministic.
+- **Externally, v5 beats v4** under both label rules and both ball-smoothing levels, and it passes the BAR-ATH label-free checks.
+
+### 13.2 What was wrong with v4's switch timing (external matches, labels from other games)
+
+On the external matches, v4 got 290 of 407 true switches within 3 s. It produced 170 "spurious" switches; about half of those were *late* corrections, switching to the team the truth already had. It missed 117, and 63% of those had a claim by the new team within 3 s.
+
+The cause: the switch was placed at the first *uncontested* claim of the new team's first *controlled* run. When the reception was contested, or broken up by stray touches, the switch landed seconds late. The convention seen on the public window is the opposite: a switch happens at the reception, or at the first pass after winning a duel.
+
+### 13.3 Ideas implemented (all optional in `events.possession_events`; all off = v4 exactly)
+
+| idea | option | result on the external matches |
+|---|---|---|
+| backdate the switch to the new team's earliest claim since the old team's last controlled run (≤ 3 s back, skipping uncontrolled touches) | `backdate=75` | helps **both** label rules |
+| …then back over the frames where a new-team player was already at the ball (≤ 1 s) | `backdate_contact=25` | helps **both** (best of the safe ideas) |
+| merge a player's claims within 0.5 s (a velocity peak plus a control onset of the *same* action used to count as two claims, which is false control) | `claim_merge=12` | + control rule, ≈ 0 touch rule on the ATD-like ball |
+| pass-completion confirmation plus requiring 3 claims | `pass_confirm`, `min_claims=3` | + control rule but −0.02 touch rule and **under-switches** (predicted/true possessions 0.89; BAR-ATH 245 → 210): rejected |
+| contested claims don't count toward control | `count_contested=False` | − touch rule (−0.02…−0.04): rejected |
+| short clean possessions (a single clean reception switches) | `clean_single` | slightly negative: rejected |
+| let backdating pass through duels | `backdate_skip_duels` | no effect: off |
+
+A final confirmation sweep around v5 showed that only the stillness weight had shifted. 0.1 is now better under both rules and both ball-smoothing levels; everything else is flat.
+
+### 13.4 Version comparison
+
+External spellF1 is the mean of 3 games × 3 seeds, shown as harness ball / ATD-like smoothed ball.
+
+| version | change from v4 | control rule | touch rule | macroF1 | BAR-ATH possessions |
+|---|---|---|---|---|---|
+| v4 | — | 0.710 / 0.693 | 0.576 / 0.541 | 0.897 / 0.886 | 245 |
+| v5a | backdate + contact | 0.714 / 0.699 | 0.584 / 0.546 | 0.899 / 0.887 | 244 |
+| v5b | v5a + claim merge | 0.723 / 0.704 | 0.570 / 0.540 | 0.899 / 0.887 | 235 |
+| v5c | v5a + pass + 3 claims | 0.727 / 0.705 | 0.556 / 0.517 | 0.900 / 0.886 | 210 (under-switching) |
+| **v5 (final)** | v5b + stillness 0.1 | **0.729 / 0.710** | **0.577 / 0.547** | **0.905 / 0.892** | 230 |
+
+**Why the control rule is primary:** it is the definition `CHALLENGE.md` gives for the ground truth. Possession changes only when the other team gains *controlled* possession. The touch rule is a guard against a looser convention.
+
+**BAR-ATH checks for v5** (label-free):
+- 230 possessions and 91 dead-ball runs; dead-ball share 0.42 / 0.44;
+- set pieces with a predicted D nearby: 51 of 53;
+- broadcast-off agreement 0.83 / 0.13;
+- blackout test, label kept: 0.91 at 5 s, 0.91 at 15 s, 0.81 at 30 s (v4: 0.91 / 0.89 / 0.74).
+
+**Public window, bug check only:** spellF1 / macroF1 for v5 is 0.436 / 0.832, against 0.388 / 0.820 for v4. This was not used for any decision; it is consistent with backdating to the first touch matching the convention.
+
+### 13.5 To submit (unchanged steps, new MD5)
+
+1. Agree the team name.
+2. Run `python solution/pipeline.py` and copy `evaluation/results/solution_final.csv` to `<team_name>.csv`.
+3. Validate the exact file; the expected MD5 is `8aac452748347bc72c7cd66db97ba5ba`.
+4. Upload `TECHNICAL_DOCUMENT.md`, or a PDF of it.
+5. Make the repo public and submit the form before the deadline.

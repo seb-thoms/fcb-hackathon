@@ -37,7 +37,7 @@ boundary.
 | tactical ATD (players and ball) | everything: touches, control, crossings, slow-downs, restarts, team shape | used |
 | Smart Tagging, set pieces | stoppage anchor around each tag start; restart team when `Team` is given; restart type → expected restart zone; second-half kick-off | used |
 | Smart Tagging, phase tags | they describe where the ball is, not who has it | dropped |
-| broadcast homography | **replay / close-up detector**: the TV feed leaves the live view when play stops. Aligned to the tactical timeline by one offset per half, *estimated in code* by sliding the two cameras' view-centre tracks against each other (+4061 and +26943 frames). "Off" means no valid homography, or view centres more than 15 m apart along the pitch. Off on ~82% of predicted dead frames against ~13% of live frames | used (soft dead-ball evidence) |
+| broadcast homography | **replay / close-up detector**: the TV feed leaves the live view when play stops. Aligned to the tactical timeline by one offset per half, *estimated in code* by sliding the two cameras' view-centre tracks against each other (+4061 and +26943 frames). "Off" means no valid homography, or view centres more than 15 m apart along the pitch. Off on ~83% of predicted dead frames against ~13% of live frames | used (soft dead-ball evidence) |
 | broadcast ATD and both videos | not downloaded; small ceiling for this design (live play with the tactical ball missing is ~5% of graded frames) | not used |
 | tactical homography | its view centre is only a weak ball proxy (~12 m off on median) | dropped |
 | self-trained team-shape model (pseudo-labels) | tried; small effect, since it only acts in live ball blackouts | dropped |
@@ -74,8 +74,16 @@ and event data, published by Metrica Sports. We thank Metrica Sports for making 
 | starter baseline (±50 majority vote) | 0.331 | 0.328 | 0.774 |
 | first rules + Viterbi (v1 logic) | 0.592 | 0.460 | 0.844 |
 | event-gated pipeline, initial parameters | 0.661 | 0.553 | 0.873 |
-| **final**, harness ball | **0.710** | **0.576** | **0.897** |
-| **final**, ball smoothed like the ATD | **0.693** | **0.541** | **0.886** |
+| event-gated pipeline, tuned parameters (v4), harness ball | 0.710 | 0.576 | 0.897 |
+| v4, ball smoothed like the ATD | 0.693 | 0.541 | 0.886 |
+| **final (v5: switch backdating + claim merging)**, harness ball | **0.729** | **0.577** | **0.905** |
+| **final (v5)**, ball smoothed like the ATD | **0.710** | **0.547** | **0.892** |
+
+We prioritise the "control" rule because it is the definition `CHALLENGE.md` gives for the ground truth:
+possession changes only when the other team gains *controlled* possession. The "touch" rule guards
+against large losses if the convention is looser. Stricter variants that gained more on the control rule
+but lost ≥ 0.02 on the touch rule, and that under-switched (predicted / true possessions 0.89), were
+rejected.
 
 The harness is easier than BAR-ATH (the baseline scores 0.33 there against 0.24 on BAR-ATH), so these
 numbers rank variants. They do not predict the BAR-ATH score.
@@ -88,9 +96,15 @@ numbers rank variants. They do not predict the BAR-ATH score.
 * **Control:** the ball within 1.0 m of a player, moving with them, with no opponent as close. A run
   of ≥ 8 such frames counts as a reception even without a velocity peak.
 * **Possession change:** only when the other team gains control. That means two claims in a row, or
-  one claim and ~0.8 s on the ball. The change is placed at the first uncontested claim of that run: a
-  reception, or the first pass after winning a duel. Single touches, deflections and duels without
-  control do not change possession.
+  one claim and ~0.8 s on the ball. Claims by the same player within 0.5 s count as one, since a single
+  action often yields both a velocity peak and a control onset. Single touches, deflections and duels
+  without control do not change possession.
+* **Where the change is placed:** at the new team's *first touch*. Once control is confirmed, the switch
+  is moved back to the new team's earliest claim since the old team's last controlled run. That search
+  goes back at most 3 s and skips uncontrolled touches in between. The switch then moves further back,
+  by up to 1 s, over the frames where a player of the new team was already at the ball. This follows
+  the convention seen on the public window: the switch happens at the reception, or at the first pass
+  after winning a duel.
 * **Dead ball starts:**
   - when the visible ball crosses a line, on the crossing frame;
   - when the ball is last seen near a line moving out;
@@ -111,9 +125,10 @@ numbers rank variants. They do not predict the BAR-ATH score.
 ## 5. Limitations
 
 * **Team-switch timing is still the main error.** On the external games, perfect team labels on top of
-  our dead-ball mask would raise spellF1 from ~0.68 to ~0.84. Perfect dead-ball labels on top of our
-  teams would only raise it to ~0.71. About half the switches land within 0.5 s, and we predict 10–25%
-  more switches than exist.
+  our dead-ball mask would raise spellF1 from ~0.69 to ~0.84. Perfect dead-ball labels on top of our
+  teams would only raise it to ~0.73. Switch counts are now close to the truth, and switch errors show
+  no bias (median signed error ~0 s). But only 40–50% of switches land within 0.5 s, and very short
+  possessions (under ~3 s) are mostly missed.
 * **Dead-ball boundaries without a visible crossing** (fouls, balls lost off-camera) rely on softer
   evidence. About 75% of BAR-ATH stoppage starts and ends coincide with a detected event; the rest are placed
   by player stillness, broadcast cuts and set-piece tags.

@@ -125,74 +125,159 @@ def control_frames(ball, bvel, players, pvel, team, P):
     ok = (dn < P["ctrl_r"]) & (rel < P["ctrl_relv"]) & (dother > dn + P["ctrl_margin"])
     ok &= ~np.isnan(ball[:, 0])
     out = np.where(ok, tj, -1).astype(np.int8)
-    return out, dn, tj
+    return out, dn, tj, j
 
 
-def possession_events(touch, ctrl, present, P, forced=None):
-    """Event-level possession: merge touches and control-episode onsets into a time-ordered list
-    of team claims, group consecutive same-team claims into runs, and keep runs that show control
-    (>= 2 claims, or >= ctrl_min frames of control in the first 2 s). `forced` = [(frame, team)]
-    claims that are always controlled and always start a new run (restarts: after every restart
-    there is a clear possessor). Returns
-      switch_frame, switch_team: first (uncontested if possible) claim of each controlled run whose
-                                 team differs from the current possessor
-      run_team: per-frame team of the latest controlled run (-1 before the first).
+def possession_events(touch, ctrl, present, P, forced=None, ctrl_slot=None, near=None):
+    """Event-level possession.
+
+    Claims = touches + control-episode onsets (+ `forced` restart claims, always controlled).
+    Consecutive same-team claims form a run; a run is *controlled* when it shows control:
+      - >= min_claims claims (contested ones counted only if count_contested) spanning >= claim_span
+        frames, or
+      - >= ctrl_min frames of control in its first 2 s, or
+      - (pass_confirm) a kick by one player followed by a claim by a team-mate within pass_window, or
+      - (clean_single) a single uncontested reception followed by >= single_ctrl control frames.
+    A controlled run of the other team switches possession. The switch is placed at the run's
+    first uncontested claim; with `backdate` it moves back to the new team's earliest claim since
+    the old team's last controlled run (skipping uncontrolled touches in between, and with
+    `backdate_skip_duels` also runs made only of contested claims; at most `backdate` frames), and
+    with `backdate_contact` further back over the frames where a player of
+    the new team was already at the ball (`near` = (nearest team, distance) per frame).
+    Returns switch frames/teams, per-frame run_team, and all non-forced claim frames/teams.
+    With the default parameters this reproduces the original rule exactly.
     """
     n = len(ctrl)
-    ev_f, ev_t, ev_c = list(touch["frame"]), list(touch["team"]), list(touch["contested"])
-    ev_x = [False] * len(ev_f)
+    F, T, C, X, K, S = [], [], [], [], [], []
+    for f, t, c, k, sl in zip(touch["frame"], touch["team"], touch["contested"], touch["kick"], touch["slot"]):
+        F.append(int(f)); T.append(int(t)); C.append(bool(c)); X.append(False); K.append(bool(k)); S.append(int(sl))
     # control-episode onsets act as receptions (slow balls do not make velocity peaks)
     for team_id in (0, 1):
         for s, e in runs_of(ctrl == team_id):
             if e - s >= P["ctrl_episode"]:
-                ev_f.append(s); ev_t.append(team_id); ev_c.append(False); ev_x.append(False)
+                F.append(int(s)); T.append(team_id); C.append(False); X.append(False); K.append(False)
+                S.append(int(ctrl_slot[s]) if ctrl_slot is not None else -1)
     for f, t in (forced or []):
-        ev_f.append(int(f)); ev_t.append(int(t)); ev_c.append(False); ev_x.append(True)
-    order = np.lexsort((~np.array(ev_x, dtype=bool), np.array(ev_f, dtype=np.int64)))
-    ev_f = np.array(ev_f, dtype=np.int64)[order]
-    ev_t = np.array(ev_t, dtype=np.int8)[order]
-    ev_c = np.array(ev_c, dtype=bool)[order]
-    ev_x = np.array(ev_x, dtype=bool)[order]
+        F.append(int(f)); T.append(int(t)); C.append(False); X.append(True); K.append(False); S.append(-1)
+    order = np.lexsort((~np.array(X, dtype=bool), np.array(F, dtype=np.int64)))
+    F = np.array(F, dtype=np.int64)[order]; T = np.array(T, dtype=np.int8)[order]
+    C = np.array(C, dtype=bool)[order]; X = np.array(X, dtype=bool)[order]
+    K = np.array(K, dtype=bool)[order]; S = np.array(S, dtype=np.int64)[order]
+
+    # optional: one action often yields two claims (a velocity peak and a control onset) -> merge
+    merge = P.get("claim_merge", 0)
+    if merge > 0 and len(F):
+        keep = np.ones(len(F), dtype=bool)
+        last = 0
+        for k in range(1, len(F)):
+            if (not X[k] and not X[last] and T[k] == T[last] and F[k] - F[last] <= merge
+                    and (S[k] == S[last] or S[k] < 0 or S[last] < 0)):
+                keep[k] = False
+                C[last] = C[last] and C[k]
+                K[last] = K[last] or K[k]
+                if S[last] < 0:
+                    S[last] = S[k]
+            else:
+                last = k
+        F, T, C, X, K, S = F[keep], T[keep], C[keep], X[keep], K[keep], S[keep]
 
     cum_ctrl = {tid: np.concatenate(([0], np.cumsum(ctrl == tid))) for tid in (0, 1)}
     runs = []
     i = 0
-    while i < len(ev_f):
+    while i < len(F):
         j = i
-        while (j + 1 < len(ev_f) and not ev_x[j + 1] and ev_t[j + 1] == ev_t[i]
-               and ev_f[j + 1] - ev_f[j] <= P["run_gap"]):
+        while (j + 1 < len(F) and not X[j + 1] and T[j + 1] == T[i]
+               and F[j + 1] - F[j] <= P["run_gap"]):
             j += 1
         runs.append((i, j))
         i = j + 1
+
+    count_contested = P.get("count_contested", True)
+    min_claims = P.get("min_claims", 2)
+    claim_span = P.get("claim_span", 0)
+    pass_confirm = P.get("pass_confirm", False)
+    pass_window = P.get("pass_window", 4 * FPS)
+    clean_single = P.get("clean_single", False)
+
+    def is_controlled(i, j):
+        if X[i]:
+            return True
+        tid = int(T[i])
+        f0 = int(F[i])
+        nctrl = cum_ctrl[tid][min(n, f0 + 2 * FPS)] - cum_ctrl[tid][f0]
+        if nctrl >= P["ctrl_min"]:
+            return True
+        ks = [k for k in range(i, j + 1) if count_contested or not C[k]]
+        if len(ks) >= min_claims and F[ks[-1]] - F[ks[0]] >= claim_span:
+            return True
+        if pass_confirm:
+            for a in range(i, j + 1):
+                if not K[a] or S[a] < 0:
+                    continue
+                for b in range(a + 1, j + 1):
+                    if F[b] - F[a] > pass_window:
+                        break
+                    if S[b] >= 0 and S[b] != S[a]:
+                        return True
+        if clean_single and j == i and not C[i] and not K[i] and nctrl >= P.get("single_ctrl", 8):
+            return True
+        return False
+
+    controlled = [is_controlled(i, j) for i, j in runs]
+    backdate = P.get("backdate", 0)
+    backdate_contact = P.get("backdate_contact", 0)
     switch_f, switch_t = [], []
     run_team = np.full(n, -1, dtype=np.int8)
     cur = -1
     marks = []
-    for i, j in runs:
-        tid = int(ev_t[i])
-        f0 = int(ev_f[i])
-        f1 = min(n, f0 + 2 * FPS)
-        nctrl = cum_ctrl[tid][f1] - cum_ctrl[tid][f0]
-        controlled = bool(ev_x[i]) or (j - i + 1 >= 2) or (nctrl >= P["ctrl_min"])
-        if not controlled:
+    for r, (i, j) in enumerate(runs):
+        if not controlled[r]:
             continue
-        if ev_x[i]:
-            marks.append((f0, tid))
+        tid = int(T[i])
+        if X[i]:
+            marks.append((int(F[i]), tid))
             cur = tid
             continue
-        if tid != cur:
-            # first uncontested claim of the run, else the first claim
-            unc = [k for k in range(i, j + 1) if not ev_c[k]]
-            f = int(ev_f[unc[0]]) if unc else f0
-            switch_f.append(f); switch_t.append(tid)
-            marks.append((f, tid))
-            cur = tid
+        if tid == cur:
+            continue
+        unc = [k for k in range(i, j + 1) if not C[k]]
+        kb = unc[0] if unc else i
+        if backdate > 0:
+            kb = i
+            limit = F[i] - backdate
+            rr = r - 1
+            skip_duels = P.get("backdate_skip_duels", False)
+            while rr >= 0:
+                a, b = runs[rr]
+                duel = skip_duels and bool(np.all(C[a:b + 1]))
+                if X[a] or (controlled[rr] and T[a] != tid and not duel) or F[b] < limit:
+                    break
+                if T[a] == tid:
+                    ks = [k for k in range(a, b + 1) if F[k] >= limit]
+                    if ks:
+                        kb = ks[0]
+                rr -= 1
+        f_sw = int(F[kb])
+        if backdate_contact > 0 and near is not None:
+            near_team, near_d = near
+            prev_other = [k for k in range(kb - 1, -1, -1) if T[k] != tid]
+            floor = int(F[prev_other[0]]) + 1 if prev_other else 0
+            t = f_sw
+            while (t - 1 > floor and f_sw - (t - 1) <= backdate_contact and near_team[t - 1] == tid
+                   and near_d[t - 1] < P.get("contact_r", 2.0)):
+                t -= 1
+            f_sw = t
+        if marks and f_sw <= marks[-1][0]:
+            f_sw = marks[-1][0] + 1
+        switch_f.append(f_sw); switch_t.append(tid)
+        marks.append((f_sw, tid))
+        cur = tid
     for idx, (f, tid) in enumerate(marks):
         end = marks[idx + 1][0] if idx + 1 < len(marks) else n
         run_team[f:end] = tid
-    keep = ~ev_x
+    keep = ~X
     return (np.array(switch_f, dtype=np.int64), np.array(switch_t, dtype=np.int8), run_team,
-            ev_f[keep], ev_t[keep])
+            F[keep], T[keep])
 
 
 # ----------------------------------------------------------------------------- dead-ball entry
