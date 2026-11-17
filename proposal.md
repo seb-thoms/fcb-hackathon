@@ -603,3 +603,116 @@ labels:
 5. **Video:** do we try our own ball detection to shrink the blackouts? (Proposed: no, unless A+B are
    done early.)
 6. **Repo visibility:** keep private until submission day, then switch to public.
+
+---
+
+## 11. Implementation status — hand-off (Nov 16, evening)
+
+> Written so anyone on the team can pick this up without the chat history. Everything below is in
+> `solution/`; data stays in `data/` (gitignored). Numbers are aggregates only.
+
+### 11.1 TL;DR
+
+- Three versions were built. **v3 is the current code** (`python solution/pipeline.py`).
+  - **v1:** rules plus a 3-state Viterbi.
+  - **v2:** v1 plus a self-trained team-shape model and a tag restart prior (commit `eb3f9de`).
+  - **v3:** a rebuild around *events*, with no ML. Team switches happen on touches, dead ball starts on line crossings or slow-downs, and dead ball ends on restarts.
+- **Which file to submit is not decided yet.** That decision waits on the external validation in §11.5. Until then, either v2 or v3 is a valid, reproducible fallback.
+- **Both versions are valid and deterministic.** v3 produces byte-identical files on rerun.
+- **v3 needs only numpy and pandas** (`requirements-solution.txt`).
+
+### 11.2 What we measured (this changed the plan)
+
+| finding | consequence |
+|---|---|
+| The ball is missing on 41% of graded frames, but **85% of missing frames sit in gaps > 10 s**, and 83% of those frames look like stoppages (players walking). During live play the ball is visible on ~91% of frames (94% in the public window). | The ball blackouts that Proposal B targeted are mostly dead ball. We **dropped the ML shape model**. |
+| Error attribution on the public window (diagnosis only, nothing fitted): with true team labels and our D, spellF1 0.48 → **0.83**. With true D and our teams, only → 0.53. In v2, team switches landed a median ~2.8 s off, stops ~5.6 s off and restarts ~7.6 s off. | The points are in **timing**: each possession switch on the right touch, each stoppage start and end on the right frame. |
+| Labelling convention, seen on the public window: switches happen on **touch moments**, meaning a reception or the new team's first pass after winning a duel. A stoppage where the ball visibly crosses a line starts **on the crossing frame**. The restart team was the nearest player at the restart kick in 4 of 4 cases. | These became the rules in v3. |
+| The **broadcast homography** is a strong dead-ball signal. The TV feed cuts to replays and close-ups when play stops. One offset per half is estimated in code (tactical = broadcast + 4061 in the 1st half, + 26943 in the 2nd). "Off" means no valid homography, or the view centres are > 15 m apart along the pitch. It is off on ~74–78% of dead frames against ~13–20% of live frames. | Used as soft dead-ball evidence in v3. |
+| **Smart Tagging:** set pieces are useful (stoppage anchor, restart team when given, restart type). Phase tags describe ball location, not possession. | Set pieces used, phase tags dropped. |
+| The **rules allow** pre-trained models, external data and labels from *other* games. | This enabled the external validation in §11.5. |
+
+### 11.3 The v3 pipeline (`solution/`)
+
+| file | what it does |
+|---|---|
+| `atd.py` | parses the tactical ATD into numpy arrays (metres) and caches them in `data/cache/` |
+| `tracks.py` | track cleaning: carries a lost player's last position for 1.5 s (so an untracked receiver doesn't vanish), drops ghosts and duplicates |
+| `events.py` | **touches** (ball-velocity change over ±5 frames with a player within 2.5 m; the ATD ball is smoothed, so ±2 frames misses most touches), **control** (ball within 1.5 m and moving with a player), **possession runs**, **line crossings**, **ball lost near a line**, **ball lost in open play**, **collective slow-down onsets** (fouls), **restarts** (ball slow, then kicked with a player at it, or ball reappearing in motion), team-shape velocities |
+| `broadcast.py` | broadcast-off signal; estimates the per-half offsets itself |
+| `pipeline.py` | `label_match(...)`, the **event-gated Viterbi** (see below), clean-up and blackout change points. Smart Tagging and broadcast are optional inputs, so the core also runs on other matches. |
+| `diagnostics.py` | label-free plausibility checks (spell counts, D runs, set pieces covered) |
+| `blackout_test.py` | hides the ball inside live possessions and checks that labels survive. Current result: 96% kept on 5 s blackouts with no false D, 88% on 15 s, 80% on 30 s |
+| `tune_external.py`, `external_report.py` | score variants on the external matches (§11.5): parameter sweep, boundary latency per type, oracle ablations |
+| `validation/metrica_sample.py` | **external validation harness (work in progress, see §11.5)** |
+
+**How the decoder works.** It scores H, A and D on every frame, but the cost of *changing* state depends on events:
+- **H↔A switch:** cheap (1.5) only at the first uncontested claim of the new team's *controlled* run, meaning ≥ 2 claims or ~0.8 s on the ball. Elsewhere it costs 12. A single touch, deflection or duel can't flip possession.
+- **Entering D:** cheap at a line crossing (0.5), a ball lost near a line (2), a ball lost in open play (3) or a slow-down onset (3). Elsewhere it costs 10.
+- **Leaving D:** cheap only at a detected restart (1 for the taker's team). Elsewhere it costs 20, so **ball movement during a stoppage doesn't end it**. The restart has to fit how the ball went out (touchline exit → touchline near the exit point; goal-line exit → corner, goal area, or centre after a goal) and the tagged set-piece type.
+- **Two passes:** every decoded restart becomes a forced possession claim for the taker's team. The taker is the nearest player at the kick, or the tag's team when given. Then the half is decoded again.
+- **Clean-up:** D runs under 2 s without a crossing are dropped, and possession blips under 0.5 s with no touch behind them are dropped.
+- **Live blackouts:** if possession changes right after a ball gap, the switch moves to where both teams' shapes reverse.
+
+Gating check: 159 of 165 decoded switches land exactly on a detected control-run touch. Dead-ball entries and exits land on a detected event about 55–65% of the time. The rest are placed by the soft evidence, which is the main thing to improve.
+
+### 11.4 Checks so far (no ground truth involved, except the last row)
+
+| | v1 | v2 | v3 |
+|---|---|---|---|
+| possessions (full match) | 278 | 283 | 259 |
+| dead-ball runs | 129 | 117 | 98 |
+| set pieces with a predicted D near the tag | 51/53 | 51/53 | 52/53 |
+| restart within 30 s of a set-piece tag start | — | 51/59 | 56/59 |
+| broadcast off: dead vs live frames | 0.72 / 0.18 | 0.74 / 0.20 | 0.78 / 0.13* |
+| *public 5-min window, bug check only:* spellF1 / macroF1 | 0.480 / 0.790 | 0.485 / 0.755 | 0.412 / 0.826 |
+
+\* v3 also uses broadcast-off as an input, so its agreement is partly circular. Without that input it is 0.72 / 0.18.
+**The public window can't rank versions:** 17 possessions, with a bootstrap range of roughly ±0.16.
+
+### 11.5 The two AI subagents that were still running at push time
+
+At hand-off, two background AI agents (Claude Code subagents on Paul's machine) were still running:
+
+1. **External validation harness on Metrica's public sample data.** This is three anonymised matches with synchronised tracking and event data, from github.com/metrica-sports/sample-data. It is free to use, and the source must be credited in the doc. The agent is building `solution/validation/metrica_sample.py`, which:
+   - downloads the matches to `data/external/` (gitignored);
+   - derives per-frame H/A/D labels from the *event data* (D from the ball going dead to the restart; possession changes only on controlled possession, placed at the new team's first controlled touch);
+   - **degrades the tracking to look like our ATD** (ball missing mostly in stoppages, ~9% of live frames missing, player dropouts, noise);
+   - exposes `load_game(game_id, degrade=True, seed=0)`, `score(labels, data)` and `evaluate(label_fn, ...)`.
+
+   **Why it matters:** it is the only metric-correlated signal we're allowed to tune on. Labels from other games are explicitly fine; the BAR-ATH public window is not a tuning set.
+
+   **Status at push:** the file is committed as work in progress. It compiles and its interface exists, but its labels and degradation haven't been checked yet.
+
+   **To use it:**
+   - `python solution/validation/metrica_sample.py` (sanity check plus baseline scores);
+   - `python solution/external_report.py` (where v3 loses points on those games);
+   - `python solution/tune_external.py --sweep` (one-at-a-time parameter sweep).
+
+   **Caveats:**
+   - The labels are event-derived, so their conventions approximate the ground truth's "corrected tracking owner".
+   - There's no Smart Tagging or broadcast for those games, so only the tracking core is validated.
+   - Try `--ball-smooth 2..3` to mimic the smoothed ATD ball.
+
+2. **Independent code review** of `events.py`, `tracks.py`, `pipeline.py` and `broadcast.py`. The reviewer looks for indexing, NaN, Viterbi and determinism bugs, and doesn't edit files. **Status at push:** no findings yet.
+
+If the session stays alive, review fixes and harness results will be pushed as follow-up commits to the **`possession-pipeline` branch**, with a PR, *not* merged into `main` automatically.
+
+### 11.6 Next steps, in order
+
+1. **Run the harness:** check its labels and degradation (e.g. the baseline scores), then run `external_report.py`.
+2. **Choose the final version on external spellF1.** Compare v3 with the old logic: v1/v2 is commit `eb3f9de`, with an adapter that runs it on any data dict. Then do a coarse sweep of the main costs and thresholds. Don't use the public window for this.
+3. **Apply the code-review findings.**
+4. **Fill in `TECHNICAL_DOCUMENT.md`:** the external numbers and limitations, plus the Metrica sample data credit.
+5. **Submit:**
+   - generate the chosen file;
+   - rename it to `<team_name>.csv` and the doc to `<team_name>.pdf` or `.md`;
+   - run `python evaluation/validate_submission.py <team_name>.csv` on the exact file;
+   - submit via the form before the deadline (the last response counts);
+   - **make the repo public** and double-check that no data is committed.
+
+**Regenerating each version:**
+- v3: `pip install -r requirements-solution.txt && python solution/pipeline.py`.
+- v2: check out `eb3f9de` in a separate worktree, `pip install scikit-learn==1.7.2`, then run `python solution/pipeline.py`.
+
+**Still open:** the team name, and the final v2/v3 choice.

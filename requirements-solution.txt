@@ -1,0 +1,4 @@
+# Pinned versions the submitted CSV was generated with (Python 3.10).
+# Reproduce:  pip install -r requirements-solution.txt && python solution/pipeline.py
+numpy==2.2.6
+pandas==2.3.3
