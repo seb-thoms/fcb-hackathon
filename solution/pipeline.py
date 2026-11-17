@@ -51,7 +51,7 @@ PARAMS = dict(
     lost_any_gap=3 * FPS,
     # emissions
     w_runteam=0.25, w_ctrl=0.5,
-    w_oob=1.0, w_fast=0.6, w_dribble=0.45, w_still=0.2, still_mid=1.5, still_half=0.5,
+    w_oob=1.0, w_fast=0.6, w_dribble=0.45, w_still=0.1, still_mid=1.5, still_half=0.5,
     w_boff=0.3, w_bon=0.25, w_tag=0.3, w_longgap=0.1,
     # transitions (costs in nats)
     pen_switch=12.0, pen_switch_event=1.5,
@@ -66,6 +66,11 @@ PARAMS = dict(
     gap_cp_min=2 * FPS, gap_cp_look=3 * FPS, gap_cp_gain=5.0,
     two_pass=True, exit_ctx_decoded=True, exit_slack=2 * FPS,
     team_flips=False,
+    # possession-switch placement and confirmation (v5; all off = the v4 rule; see events.py)
+    backdate=3 * FPS, backdate_contact=FPS, contact_r=2.0, backdate_skip_duels=False, claim_merge=12,
+    count_contested=True,
+    min_claims=2, claim_span=0, pass_confirm=False, pass_window=4 * FPS, clean_single=False,
+    single_ctrl=8,
 )
 
 
@@ -143,8 +148,10 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
     pvel = ev.velocity(players, 2)
     bspeed = np.linalg.norm(bvel, axis=1)
     touch = ev.detect_touches(ball, bvel, players, pvel, team, P)
-    ctrl, dn, tj = ev.control_frames(ball, bvel, players, pvel, team, P)
-    sw_f, sw_t, run_team, ev_f, ev_t = ev.possession_events(touch, ctrl, present, P)
+    ctrl, dn, tj, cslot = ev.control_frames(ball, bvel, players, pvel, team, P)
+    near = (np.where(np.isfinite(dn), tj, -1), dn)
+    sw_f, sw_t, run_team, ev_f, ev_t = ev.possession_events(touch, ctrl, present, P,
+                                                            ctrl_slot=cslot, near=near)
     ps = ev.mean_player_speed(players_real)
     cross_f, cross_goal = ev.line_crossings(ball, bvel, present, L, W, P)
     lost_f = ev.lost_near_line(ball, bvel, present, L, W, P)
@@ -280,7 +287,8 @@ def label_match(data, halves, home_pos_first=True, tags=None, bcast_off=None, P=
             taker.setdefault(r["frame"], r["team"])
         forced = [(t, taker[t]) for t in range(1, n)
                   if path[t - 1] == D and path[t] in (H, A) and t in taker]
-        sw_f, sw_t, run_team, ev_f, ev_t = ev.possession_events(touch, ctrl, present, P, forced=forced)
+        sw_f, sw_t, run_team, ev_f, ev_t = ev.possession_events(touch, ctrl, present, P, forced=forced,
+                                                                ctrl_slot=cslot, near=near)
         sH, sA = team_scores(run_team)
         swH, swA = switch_costs(sw_f, sw_t)
         if P["exit_ctx_decoded"]:
