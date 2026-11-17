@@ -863,3 +863,8 @@ External spellF1 is the mean of 3 games × 3 seeds, shown as harness ball / ATD-
 3. Validate the exact file; the expected MD5 is `8aac452748347bc72c7cd66db97ba5ba`.
 4. Upload `TECHNICAL_DOCUMENT.md`, or a PDF of it.
 5. Make the repo public and submit the form before the deadline.
+
+---
+
+> **Note (Nov 17):** `TECHNICAL_DOCUMENT.md`, referenced above, was renamed to
+> [`submission/Fellowship.md`](submission/Fellowship.md), the document submitted through the form.

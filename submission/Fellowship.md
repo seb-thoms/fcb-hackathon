@@ -53,6 +53,8 @@ touches, a stoppage starting on the line-crossing frame, the restart team being 
 **External validation, with labels from other games:** the **Metrica Sports public sample data**
 (github.com/metrica-sports/sample-data). These are three anonymised matches with synchronised tracking
 and event data, published by Metrica Sports. We thank Metrica Sports for making them public.
+The event data was produced by Metrica Sports and published with the sample; our team labelled
+nothing by hand. Amount: 3 matches, about 700 labelled possessions.
 
 - **Labels:** per-frame H/A/D, derived algorithmically from the event data (`solution/validation/`):
   - D runs from the ball going dead (the line-crossing frame, foul, offside, goal) to the restart;
